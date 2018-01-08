@@ -18,16 +18,16 @@ def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
 
 parser = argparse.ArgumentParser(description='Single Shot MultiBox Detector Training')
-parser.add_argument('--version', default='v2', help='conv11_2(v2) or pool6(v1) as last layer')
+parser.add_argument('--version', default='v2', help='300(v2) or 512(v1) as last layer')
 parser.add_argument('--basenet', default='vgg16_reducedfc.pth', help='pretrained base model')
 parser.add_argument('--jaccard_threshold', default=0.5, type=float, help='Min Jaccard index for matching')
-parser.add_argument('--batch_size', default=16, type=int, help='Batch size for training')
+parser.add_argument('--batch_size', default=8, type=int, help='Batch size for training')
 parser.add_argument('--resume', default=None, type=str, help='Resume from checkpoint')
 parser.add_argument('--num_workers', default=2, type=int, help='Number of workers used in dataloading')
 parser.add_argument('--iterations', default=120000, type=int, help='Number of training iterations')
 parser.add_argument('--start_iter', default=0, type=int, help='Begin counting iterations starting from this value (should be used with resume)')
 parser.add_argument('--cuda', default=True, type=str2bool, help='Use cuda to train model')
-parser.add_argument('--lr', '--learning-rate', default=1e-3, type=float, help='initial learning rate')
+parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
 parser.add_argument('--weight_decay', default=5e-4, type=float, help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float, help='Gamma update for SGD')
@@ -48,25 +48,27 @@ cfg = (v1, v2)[args.version == 'v2']
 if not os.path.exists(args.save_folder):
     os.mkdir(args.save_folder)
 
-train_sets = [('2007', 'trainval'), ('2012', 'trainval')]
+train_sets = [('2007', 'trainval')]#, ('2012', 'trainval')]
 # train_sets = 'train'
 ssd_dim = 300  # only support 300 now
 means = (104, 117, 123)  # only support voc now
 num_classes = len(VOC_CLASSES) + 1
 batch_size = args.batch_size
-accum_batch_size = 32
+accum_batch_size = 8
 iter_size = accum_batch_size / batch_size
 max_iter = 120000
 weight_decay = 0.0005
-stepvalues = (80000, 100000, 120000)
-gamma = 0.1
+# stepvalues = (80000, 100000, 120000)
+# stepvalues = (10, 20, 30, 40)
+stepvalues = (5000, 80000, 100000, 120000)
+gamma = (10, 0.1, 0.1, 0.1)
 momentum = 0.9
 
 if args.visdom:
     import visdom
     viz = visdom.Visdom()
 
-ssd_net = build_ssd('train', 300, num_classes)
+ssd_net = build_ssd('train', ssd_dim, num_classes)
 net = ssd_net
 
 if args.cuda:
@@ -117,10 +119,9 @@ def train():
 
     dataset = VOCDetection(args.voc_root, train_sets, SSDAugmentation(
         ssd_dim, means), AnnotationTransform())
-
     epoch_size = len(dataset) // args.batch_size
     print('Training SSD on', dataset.name)
-    step_index = 0
+    step_index = int(0)
     if args.visdom:
         # initialize visdom loss plot
         lot = viz.line(
@@ -145,14 +146,14 @@ def train():
         )
     batch_iterator = None
     data_loader = data.DataLoader(dataset, batch_size, num_workers=args.num_workers,
-                                  shuffle=True, collate_fn=detection_collate, pin_memory=True)
+                                  shuffle=True, collate_fn=detection_collate, pin_memory=False)
     for iteration in range(args.start_iter, max_iter):
         if (not batch_iterator) or (iteration % epoch_size == 0):
             # create batch iterator
             batch_iterator = iter(data_loader)
         if iteration in stepvalues:
             step_index += 1
-            adjust_learning_rate(optimizer, args.gamma, step_index)
+            adjust_learning_rate(optimizer, gamma, step_index)
             if args.visdom:
                 viz.line(
                     X=torch.ones((1, 3)).cpu() * epoch,
@@ -212,9 +213,9 @@ def train():
                 )
         if iteration % 5000 == 0:
             print('Saving state, iter:', iteration)
-            torch.save(ssd_net.state_dict(), 'weights/ssd300_0712_' +
+            torch.save(ssd_net.state_dict(), 'weights/ssd{}_t1_'.format(ssd_dim) +
                        repr(iteration) + '.pth')
-    torch.save(ssd_net.state_dict(), args.save_folder + '' + args.version + '.pth')
+    torch.save(ssd_net.state_dict(), args.save_folder + '' + 't1' + '.pth')
 
 
 def adjust_learning_rate(optimizer, gamma, step):
@@ -222,7 +223,9 @@ def adjust_learning_rate(optimizer, gamma, step):
     # Adapted from PyTorch Imagenet example:
     # https://github.com/pytorch/examples/blob/master/imagenet/main.py
     """
-    lr = args.lr * (gamma ** (step))
+    # lr = args.lr * (gamma ** (step))
+    lr = args.lr * np.prod(np.array(gamma[:step]))
+    print('Learning rate changes to {}'.format(lr))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 

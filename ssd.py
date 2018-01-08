@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from layers import *
-from data import v2
+from data import v1, v2
 import os
 
 
@@ -24,17 +24,20 @@ class SSD(nn.Module):
         head: "multibox head" consists of loc and conf conv layers
     """
 
-    def __init__(self, phase, base, extras, head, num_classes):
+    def __init__(self, phase, size, base, extras, head, num_classes):
         super(SSD, self).__init__()
         self.phase = phase
         self.num_classes = num_classes
         # TODO: implement __call__ in PriorBox
-        self.priorbox = PriorBox(v2)
+        if size == 300:
+            self.priorbox = PriorBox(v2) 
+        else:
+            self.priorbox = PriorBox(v1)
         self.priors = Variable(self.priorbox.forward(), volatile=True)
-        self.size = 300
+        self.size = size
 
         # SSD network
-        self.vgg = nn.ModuleList(base)
+        self.vgg = nn.ModuleList(base) # nn.ModuleList可迭代
         # Layer learns to scale the l2 normalized features from conv4_3
         self.L2Norm = L2Norm(512, 20)
         self.extras = nn.ModuleList(extras)
@@ -44,7 +47,7 @@ class SSD(nn.Module):
 
         if phase == 'test':
             self.softmax = nn.Softmax()
-            self.detect = Detect(num_classes, 0, 200, 0.01, 0.45)
+            self.detect = Detect(num_classes, 0, 200, 0.01, 0.45) # num_classes, bkg_label, top_k, conf_thresh, nms_thresh
 
     def forward(self, x):
         """Applies network layers and ops on input image(s) x.
@@ -88,11 +91,11 @@ class SSD(nn.Module):
                 sources.append(x)
 
         # apply multibox head to source layers
-        for (x, l, c) in zip(sources, self.loc, self.conf):
-            loc.append(l(x).permute(0, 2, 3, 1).contiguous())
+        for (x, l, c) in zip(sources, self.loc, self.conf): #各feature层输入loc、conf（卷积）
+            loc.append(l(x).permute(0, 2, 3, 1).contiguous()) #改变形状（batch，通道数，H，W）->（batch，H，W，通道数）
             conf.append(c(x).permute(0, 2, 3, 1).contiguous())
 
-        loc = torch.cat([o.view(o.size(0), -1) for o in loc], 1)
+        loc = torch.cat([o.view(o.size(0), -1) for o in loc], 1) #连成一行
         conf = torch.cat([o.view(o.size(0), -1) for o in conf], 1)
         if self.phase == "test":
             output = self.detect(
@@ -112,7 +115,7 @@ class SSD(nn.Module):
         other, ext = os.path.splitext(base_file)
         if ext == '.pkl' or '.pth':
             print('Loading weights into state dict...')
-            self.load_state_dict(torch.load(base_file, map_location=lambda storage, loc: storage))
+            self.load_state_dict(torch.load(base_file))# , map_location=lambda storage, loc: storage))
             print('Finished!')
         else:
             print('Sorry only .pth and .pkl files supported.')
@@ -149,10 +152,13 @@ def add_extras(cfg, i, batch_norm=False):
     in_channels = i
     flag = False
     for k, v in enumerate(cfg):
-        if in_channels != 'S':
+        if in_channels not in ('S', 'F'):
             if v == 'S':
                 layers += [nn.Conv2d(in_channels, cfg[k + 1],
                            kernel_size=(1, 3)[flag], stride=2, padding=1)]
+            elif v == 'F':
+                layers += [nn.Conv2d(in_channels, cfg[k + 1],
+                           kernel_size=4, padding=1)]
             else:
                 layers += [nn.Conv2d(in_channels, v, kernel_size=(1, 3)[flag])]
             flag = not flag
@@ -180,15 +186,16 @@ def multibox(vgg, extra_layers, cfg, num_classes):
 base = {
     '300': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'C', 512, 512, 512, 'M',
             512, 512, 512],
-    '512': [],
+    '512': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'C', 512, 512, 512, 'M',
+            512, 512, 512],
 }
 extras = {
     '300': [256, 'S', 512, 128, 'S', 256, 128, 256, 128, 256],
-    '512': [],
+    '512': [256, 'S', 512, 128, 'S', 256, 128, 'S', 256, 128, 'S', 256, 128, 'F', 256],
 }
 mbox = {
     '300': [4, 6, 6, 6, 4, 4],  # number of boxes per feature map location
-    '512': [],
+    '512': [4, 6, 6, 6, 6, 4, 4],
 }
 
 
@@ -196,10 +203,10 @@ def build_ssd(phase, size=300, num_classes=21):
     if phase != "test" and phase != "train":
         print("Error: Phase not recognized")
         return
-    if size != 300:
-        print("Error: Sorry only SSD300 is supported currently!")
+    if size not in (300, 512):
+        print("Error: Sorry only SSD300 or SSD512 is supported currently!")
         return
 
-    return SSD(phase, *multibox(vgg(base[str(size)], 3),
+    return SSD(phase, size, *multibox(vgg(base[str(size)], 3),
                                 add_extras(extras[str(size)], 1024),
                                 mbox[str(size)], num_classes), num_classes)
